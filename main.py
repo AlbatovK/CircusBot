@@ -1,11 +1,29 @@
 import json
+import time
 from typing import List
 
 from pyrebase import pyrebase
 from pyrebase.pyrebase import Firebase, PyreResponse
-from telegram.ext import Updater
+from telegram import InlineKeyboardButton, ReplyKeyboardMarkup, InlineKeyboardMarkup
+from telegram.ext import Updater, MessageHandler, Filters, CommandHandler
 
 config_name, token = 'config.json', '5303647214:AAFfM1nxeSQw7z259f0Ka_KAUIm_mVpJyCo'
+
+data_set = {
+    'Coffee': 'coffee',
+    'Microwave': 'microwave',
+}
+
+reply_keyboard = [
+    ['/register', '/a'],
+    ['/b', '/c']
+]
+
+key_objs = [InlineKeyboardButton(text=key, callback_data=val) for key, val in data_set.items()]
+keys = [key_objs[i:i + 2] for i in range(0, len(key_objs) + 1, 2)]
+
+markup = ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=False)
+keyboard = InlineKeyboardMarkup(keys)
 
 
 def get_config() -> str:
@@ -86,12 +104,53 @@ class DeviceDao:
         self.db.child("devices").push(device_dict)
 
 
+def start(update, context):
+    update.message.reply_text("Выберите устройство.")
+
+
+def help(update, context):
+    update.message.reply_text("Я бот справочник.")
+
+
+def address(update, context):
+    update.message.reply_text("Адрес: г. Москва, ул. Льва Толстого, 16", reply_markup=markup)
+
+
+def phone(update, context):
+    update.message.reply_text("Выберите устройство.", reply_markup=keyboard)
+
+
+def site(update, context):
+    update.message.reply_text(
+        "Сайт: https://github.com/CondInPunz/SunLust", reply_markup=markup)
+
+
+def work_time(update, context):
+    update.message.reply_text("Начинаю стирать.")
+    time.sleep(3)
+    update.message.reply_text("Кофе готов!")
+
+
+def echo(update, context):
+    update.message.reply_text(update.message.text)
+
+
 def main():
     firebase = establish_firebase()
     dev_dao = DeviceDao(firebase)
     usr_dao = UserDao(firebase)
 
     updater = Updater(token)
+    dp = updater.dispatcher
+
+    dp.add_handler(MessageHandler(Filters.text & ~ Filters.command, echo))
+    dp.add_handler(CommandHandler("register", start))
+    dp.add_handler(CommandHandler("help", help))
+    dp.add_handler(CommandHandler("address", address))
+    dp.add_handler(CommandHandler("phone", phone))
+    dp.add_handler(CommandHandler("site", site))
+    dp.add_handler(CommandHandler("work_time", work_time))
+
     updater.start_polling()
     updater.idle()
 
