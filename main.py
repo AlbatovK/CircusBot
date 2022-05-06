@@ -1,118 +1,100 @@
-import logging
-from telegram.ext import Updater, MessageHandler, Filters, CommandHandler
-from telegram import ReplyKeyboardMarkup
-from telegram import ReplyKeyboardRemove
+import json
+from typing import List
+
+from pyrebase import pyrebase
+from pyrebase.pyrebase import Firebase, PyreResponse
+from telegram.ext import Updater
+
+config_name, token = 'config.json', '5303647214:AAFfM1nxeSQw7z259f0Ka_KAUIm_mVpJyCo'
 
 
-# Запускаем логгирование
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.DEBUG
-)
-
-logger = logging.getLogger(__name__)
-
-TOKEN = '5303647214:AAFfM1nxeSQw7z259f0Ka_KAUIm_mVpJyCo'
-
-reply_keyboard = [['/address', '/phone'],
-                  ['/site', '/work_time']]
-markup = ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=False)
+def get_config() -> str:
+    with open(config_name, 'r') as config_file:
+        return parse_from_file(config_file)
 
 
-# Напишем соответствующие функции.
-# Их сигнатура и поведение аналогичны обработчикам текстовых сообщений.
-def start(update, context):
-    update.message.reply_text(
-        """Привет! Я эхо-бот. Я пародирую Артёма Подворного, когда он общается с Юлей""", reply_markup=markup)
+def parse_from_file(read_file) -> str:
+    return json.load(read_file)
 
 
-def help(update, context):
-    update.message.reply_text(
-        "Я пока не умею помогать... Я клоун")
+def establish_firebase():
+    firebase_config = get_config()
+    return pyrebase.initialize_app(firebase_config)
 
 
-def close_keyboard(update, context):
-    update.message.reply_text(
-        "Ok",
-        reply_markup=ReplyKeyboardRemove()
-    )
+class User:
+
+    def __init__(self, login: str):
+        self.login = login
 
 
-# Определяем функцию-обработчик сообщений.
-# У неё два параметра, сам бот и класс updater, принявший сообщение.
-def echo(update, context):
-    # У объекта класса Updater есть поле message,
-    # являющееся объектом сообщения.
-    # У message есть поле text, содержащее текст полученного сообщения,
-    # а также метод reply_text(str),
-    # отсылающий ответ пользователю, от которого получено сообщение.
-    update.message.reply_text('Да!' + update.message.text)
+class Device:
+
+    def __init__(self, name: str, users_id: List[str], active):
+        self.name = name
+        self.users_id = users_id
+        self.active = active
 
 
-# Напишем соответствующие функции.
-def help(update, context):
-    update.message.reply_text(
-        "Я бот справочник.")
+class ObjectMapper:
+
+    @staticmethod
+    def parse_devices(response: PyreResponse) -> List[Device]:
+        def parse_single(item: PyreResponse):
+            return Device(item.val()['name'], item.val()['users_id'], item.val()['active'])
+
+        map_query = map(parse_single, response.each())
+        return list(map_query)
+
+    @staticmethod
+    def parse_users(response: PyreResponse) -> List[User]:
+        def parse_single(item: PyreResponse):
+            return User(item.val()['login'])
+
+        map_query = map(parse_single, response.each())
+        return list(map_query)
 
 
-def address(update, context):
-    update.message.reply_text(
-        "Адрес: г. Москва, ул. Льва Толстого, 16")
+class UserDao:
+
+    def __init__(self, firebase: Firebase):
+        self.db = firebase.database()
+
+    def get_all(self):
+        users = self.db.child("users").get()
+        return ObjectMapper.parse_users(users) if users.each() is not None else []
+
+    def insert(self, user: User):
+        user_dict = user.__dict__
+        self.db.child("users").push(user_dict)
 
 
-def phone(update, context):
-    update.message.reply_text("Телефон: +7(495)776-3030")
+class DeviceDao:
 
+    def __init__(self, firebase: Firebase):
+        self.db = firebase.database()
 
-def site(update, context):
-    update.message.reply_text(
-        "Сайт: http://www.yandex.ru/company")
+    def get_all(self):
+        devices = self.db.child("devices").get()
+        return ObjectMapper.parse_devices(devices) if devices.each() is not None else []
 
+    def get_by_user(self, user: User):
+        return [d for d in self.get_all() if user.login in d.users_id]
 
-def work_time(update, context):
-    update.message.reply_text(
-        "Время работы: круглосуточно.")
+    def insert(self, device: Device):
+        device_dict = device.__dict__
+        self.db.child("devices").push(device_dict)
 
 
 def main():
-    # Создаём объект updater.
-    # Вместо слова "TOKEN" надо разместить полученный от @BotFather токен
-    updater = Updater(TOKEN)
+    firebase = establish_firebase()
+    dev_dao = DeviceDao(firebase)
+    usr_dao = UserDao(firebase)
 
-    # Получаем из него диспетчер сообщений.
-    dp = updater.dispatcher
-
-    # Зарегистрируем их в диспетчере рядом
-    # с регистрацией обработчиков текстовых сообщений.
-    # Первым параметром конструктора CommandHandler я
-    # вляется название команды.
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CommandHandler("help", help))
-
-    dp.add_handler(CommandHandler("address", address))
-    dp.add_handler(CommandHandler("phone", phone))
-    dp.add_handler(CommandHandler("site", site))
-    dp.add_handler(CommandHandler("work_time", work_time))
-    dp.add_handler(CommandHandler("help", help))
-    dp.add_handler(CommandHandler("close", close_keyboard))
-
-
-    # Создаём обработчик сообщений типа Filters.text
-    # из описанной выше функции echo()
-    # После регистрации обработчика в диспетчере
-    # эта функция будет вызываться при получении сообщения
-    # с типом "текст", т. е. текстовых сообщений.
-    text_handler = MessageHandler(Filters.text, echo)
-
-    # Регистрируем обработчик в диспетчере.
-    dp.add_handler(text_handler)
-    # Запускаем цикл приема и обработки сообщений.
+    updater = Updater(token)
     updater.start_polling()
-
-    # Ждём завершения приложения.
-    # (например, получения сигнала SIG_TERM при нажатии клавиш Ctrl+C)
     updater.idle()
 
 
-# Запускаем функцию main() в случае запуска скрипта.
 if __name__ == '__main__':
     main()
