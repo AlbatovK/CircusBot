@@ -10,7 +10,7 @@ from requests import HTTPError
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, CallbackContext, MessageHandler, Filters
 
-config_name, token = 'config.json', '5303647214:AAFfM1nxeSQw7z259f0Ka_KAUIm_mVpJyCo'
+config_name, token = 'config.json', '5332578418:AAGXhhCRmXroyGoLpSPK1mEwgNQ909YYJdw'
 
 start_keys = [
     ['/register', '/login'],
@@ -41,10 +41,18 @@ class User:
 
 class Device:
 
-    def __init__(self, name: str, users_id: List[str], active):
+    def __init__(self, name: str, tp, users_id: List[str], active):
         self.name = name
+        self.tp = tp
         self.users_id = users_id
         self.active = active
+
+
+class Root:
+
+    def __init__(self, name, actions):
+        self.name = name
+        self.actions = actions
 
 
 class ObjectMapper:
@@ -52,7 +60,7 @@ class ObjectMapper:
     @staticmethod
     def parse_devices(response: PyreResponse) -> List[Device]:
         def parse_single(item: PyreResponse):
-            return Device(item.val()['name'], item.val()['users_id'], item.val()['active'])
+            return Device(item.val()['name'], item.val()['tp'], item.val()['users_id'], item.val()['active'])
 
         map_query = map(parse_single, response.each())
         return list(map_query)
@@ -61,6 +69,14 @@ class ObjectMapper:
     def parse_users(response: PyreResponse) -> List[User]:
         def parse_single(item: PyreResponse):
             return User(item.val()['login'])
+
+        map_query = map(parse_single, response.each())
+        return list(map_query)
+
+    @staticmethod
+    def parse_roots(response: PyreResponse) -> List[Root]:
+        def parse_single(item: PyreResponse):
+            return Root(item.val()['name'], item.val()['actions'])
 
         map_query = map(parse_single, response.each())
         return list(map_query)
@@ -101,6 +117,23 @@ class DeviceDao:
         self.db.child("devices").child(device.name).set(device_dict)
 
 
+class RootDao:
+
+    def __init__(self, fb: Firebase):
+        self.db = fb.database()
+
+    def insert(self, root: Root):
+        root_dict = root.__dict__
+        self.db.child("device_root").child(root.name).set(root_dict)
+
+    def get_all(self) -> List[Root]:
+        roots = self.db.child("device_root").get()
+        return ObjectMapper.parse_roots(roots) if roots.each() is not None else []
+
+    def get_by_name(self, name: str):
+        return [x for x in self.get_all() if x.name == name]
+
+
 def get_config() -> str:
     with open(config_name, 'r') as config_file:
         return parse_from_file(config_file)
@@ -118,6 +151,7 @@ def establish_firebase():
 firebase = establish_firebase()
 dev_dao = DeviceDao(firebase)
 usr_dao = UserDao(firebase)
+rts_dao = RootDao(firebase)
 user = None
 
 
@@ -233,6 +267,12 @@ spec_words = {
     "Вы разочаровать партию! Партия забрать у вас кошка-жена!": ['база', 'кринж']
 }
 
+morph = pymorphy2.MorphAnalyzer()
+
+
+def return_normal_form(word):
+    return morph.parse(word)[0].normal_form
+
 
 def handle_message(update: Update, context):
     global registering, entering, inserting, user
@@ -244,32 +284,34 @@ def handle_message(update: Update, context):
             return
 
         text = update.message.text.split()
-        analyzer = pymorphy2.MorphAnalyzer()
-
         for word in text:
-            word_info = analyzer.parse(word)
 
             for key, list_special_word in spec_words.items():
                 if word.lower() in list_special_word:
                     update.message.reply_text(key)
                     return
 
-            for vary in word_info:
-                if vary.tag.POS == 'VERB' and vary.tag.mood == 'impr':
+            for d in dev_dao.get_by_user(user):
+                if return_normal_form(word) in rts_dao.get_by_name(d.tp.lower())[0].actions:
                     def async_write():
-                        update.message.reply_text('Выполняю вашу просьбу.')
+                        update.message.reply_text(d.name + ' выполняет вашу просьбу.')
                         time.sleep(5)
                         update.message.reply_text("Всё готово.")
 
                     Thread(target=async_write).run()
                     return
 
-            update.message.reply_text('Я не понял вашу команду.')
-            return
+        update.message.reply_text('Ваша команда не может быть выполнена с вашими устройствами.')
+        return
 
     if inserting is True:
-        name = update.message.text
-        dev_dao.insert(Device(name, [user.login], False))
+        tp, name = update.message.text.split()[0], update.message.text.split()[1]
+
+        if tp.lower() not in map(lambda x: x.name, rts_dao.get_all()):
+            update.message.reply_text("Данный вид техники не поддерживается.")
+            return
+
+        dev_dao.insert(Device(name, tp, [user.login], False))
         inserting = False
 
         def async_write():
@@ -324,7 +366,7 @@ def add_device(update: Update, context):
         return
 
     inserting = True
-    update.message.reply_text("Введите название прибора.")
+    update.message.reply_text("Введите тип и название прибора.")
 
 
 def main():
