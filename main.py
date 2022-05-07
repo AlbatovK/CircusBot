@@ -1,6 +1,9 @@
 import json
+import time
+from threading import Thread
 from typing import List
 
+import pymorphy2
 from pyrebase import pyrebase
 from pyrebase.pyrebase import Firebase, PyreResponse
 from requests import HTTPError
@@ -32,8 +35,8 @@ device_action_keys = [
 
 class User:
 
-    def __init__(self, login: str):
-        self.login = login
+    def __init__(self, lgn: str):
+        self.login = lgn
 
 
 class Device:
@@ -72,8 +75,8 @@ class UserDao:
         users = self.db.child("users").get()
         return ObjectMapper.parse_users(users) if users.each() is not None else []
 
-    def insert(self, user: User):
-        user_dict = user.__dict__
+    def insert(self, usr: User):
+        user_dict = usr.__dict__
         self.db.child("users").push(user_dict)
 
 
@@ -90,8 +93,8 @@ class DeviceDao:
         devices = self.db.child("devices").get()
         return ObjectMapper.parse_devices(devices) if devices.each() is not None else []
 
-    def get_by_user(self, user: User):
-        return [d for d in self.get_all() if user.login in d.users_id]
+    def get_by_user(self, usr: User):
+        return [d for d in self.get_all() if usr.login in d.users_id]
 
     def insert(self, device: Device):
         device_dict = device.__dict__
@@ -141,7 +144,9 @@ def device_chooser(update: Update, context: CallbackContext):
 
     for i, j in enumerate(all_dev):
         if choice == str(i):
-            query.edit_message_text("Вы выбрали " + j.name, reply_markup=keyboard)
+            query.edit_message_text(
+                "Вы выбрали " + j.name + '. Прибор ' + ('бездействует.' if not j.active else 'активен.'),
+                reply_markup=keyboard)
             chosen_device = j
             return
 
@@ -165,6 +170,11 @@ def device_chooser(update: Update, context: CallbackContext):
 
 
 def command(update: Update, context):
+    global registering, entering, inserting
+    registering = False
+    entering = False
+    inserting = False
+
     if user is None:
         update.message.reply_text("Вы не вошли в систему.")
         return
@@ -173,7 +183,8 @@ def command(update: Update, context):
     lst = [InlineKeyboardButton(text=j.name, callback_data=i) for i, j in enumerate(all_devs)]
     keys = [lst[i:i + 2] for i in range(0, len(lst) + 1, 2)]
     inline_keyboard = InlineKeyboardMarkup(keys)
-    update.message.reply_text("Выберите устройство.", reply_markup=inline_keyboard)
+    update.message.reply_text("Доступные вам устройства." if len(all_devs) > 0 else 'У вас нет устройств.',
+                              reply_markup=inline_keyboard)
 
 
 hint_dict = {
@@ -217,18 +228,66 @@ def parse_error_response(e: HTTPError):
     return str(e.errno).split()[0], json.loads(e.strerror)["error"]["message"].split()[0]
 
 
+SPECIAL_WORDS = {
+    "ВНИМАНИЕ! Вы использовали слова 'база' или 'кринж' в диалоге с ботом!" + \
+    "Вы разочаровать партию! Партия забрать у вас кошка-жена!": ['база', 'кринж']
+}
+
+
+def analyze_text(text):
+    text = text.split()
+    analyzer = pymorphy2.MorphAnalyzer()
+
+    for word in text:
+        word_info = analyzer.parse(word)
+
+        for key, list_special_word in SPECIAL_WORDS.items():
+            if word.lower() in list_special_word:
+                return key
+
+        for vary in word_info:
+            if vary.tag.POS == 'VERB' and vary.tag.mood == 'impr':
+                return True
+
+    return False
+
+
 def handle_message(update: Update, context):
     global registering, entering, user, inserting
 
     if registering is False and entering is False and inserting is False:
-        update.message.reply_text("Не используется ни одна команда. Выберите из списка.")
-        return
+
+        if user is None:
+            update.message.reply_text("Вы не вошли в систему.")
+            return
+
+        res = analyze_text(update.message.text)
+
+        if not res:
+            update.message.reply_text('Я не понял вашу команду.')
+            return
+
+        else:
+
+            def async_write():
+                update.message.reply_text('Выполняю вашу просьбу.')
+                time.sleep(5)
+                update.message.reply_text("Всё готово.")
+
+            Thread(target=async_write).run()
+            return
 
     if inserting is True:
         name = update.message.text
         dev_dao.insert(Device(name, [user.login], False))
         inserting = False
-        update.message.reply_text("Прибор " + name + " зарегистрирован.")
+
+        def async_write():
+            update.message.reply_text("Соединяю вас и " + name)
+            time.sleep(2)
+            update.message.reply_text("Привет. Готов служить вам.")
+
+        Thread(target=async_write).run()
         return
 
     if entering is True:
@@ -251,9 +310,11 @@ def handle_message(update: Update, context):
 
     email, usr_login = update.message.text.split()[0], update.message.text.split()[1]
     auth = firebase.auth()
+
     try:
         fb_usr = auth.create_user_with_email_and_password(email + "@gmail.com", usr_login)
         fb_usr = auth.refresh(fb_usr['refreshToken'])
+        usr_dao.insert(User(email))
         print(fb_usr)
     except HTTPError as e:
         code, msg = parse_error_response(e)
