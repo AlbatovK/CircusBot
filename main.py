@@ -228,32 +228,14 @@ def parse_error_response(e: HTTPError):
     return str(e.errno).split()[0], json.loads(e.strerror)["error"]["message"].split()[0]
 
 
-SPECIAL_WORDS = {
-    "ВНИМАНИЕ! Вы использовали слова 'база' или 'кринж' в диалоге с ботом!" + \
+spec_words = {
+    "ВНИМАНИЕ! Вы использовали слова 'база' или 'кринж' в диалоге с ботом! " +
     "Вы разочаровать партию! Партия забрать у вас кошка-жена!": ['база', 'кринж']
 }
 
 
-def analyze_text(text):
-    text = text.split()
-    analyzer = pymorphy2.MorphAnalyzer()
-
-    for word in text:
-        word_info = analyzer.parse(word)
-
-        for key, list_special_word in SPECIAL_WORDS.items():
-            if word.lower() in list_special_word:
-                return key
-
-        for vary in word_info:
-            if vary.tag.POS == 'VERB' and vary.tag.mood == 'impr':
-                return True
-
-    return False
-
-
 def handle_message(update: Update, context):
-    global registering, entering, user, inserting
+    global registering, entering, inserting, user
 
     if registering is False and entering is False and inserting is False:
 
@@ -261,20 +243,28 @@ def handle_message(update: Update, context):
             update.message.reply_text("Вы не вошли в систему.")
             return
 
-        res = analyze_text(update.message.text)
+        text = update.message.text.split()
+        analyzer = pymorphy2.MorphAnalyzer()
 
-        if not res:
+        for word in text:
+            word_info = analyzer.parse(word)
+
+            for key, list_special_word in spec_words.items():
+                if word.lower() in list_special_word:
+                    update.message.reply_text(key)
+                    return
+
+            for vary in word_info:
+                if vary.tag.POS == 'VERB' and vary.tag.mood == 'impr':
+                    def async_write():
+                        update.message.reply_text('Выполняю вашу просьбу.')
+                        time.sleep(5)
+                        update.message.reply_text("Всё готово.")
+
+                    Thread(target=async_write).run()
+                    return
+
             update.message.reply_text('Я не понял вашу команду.')
-            return
-
-        else:
-
-            def async_write():
-                update.message.reply_text('Выполняю вашу просьбу.')
-                time.sleep(5)
-                update.message.reply_text("Всё готово.")
-
-            Thread(target=async_write).run()
             return
 
     if inserting is True:
