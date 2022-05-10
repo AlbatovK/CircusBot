@@ -1,13 +1,21 @@
 import json
+import os
+import time
+from subprocess import Popen
+from threading import Thread
 from typing import List
 
+import pymorphy2
+import soundfile as soundfile
+from pydub import AudioSegment
 from pyrebase import pyrebase
 from pyrebase.pyrebase import Firebase, PyreResponse
 from requests import HTTPError
-from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
+from speech_recognition import Recognizer, AudioFile, UnknownValueError, RequestError
+from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup, File
 from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, CallbackContext, MessageHandler, Filters
 
-config_name, token = 'config.json', '5303647214:AAFfM1nxeSQw7z259f0Ka_KAUIm_mVpJyCo'
+config_name, token = 'config.json', '5332578418:AAGXhhCRmXroyGoLpSPK1mEwgNQ909YYJdw'
 
 start_keys = [
     ['/register', '/login'],
@@ -32,16 +40,24 @@ device_action_keys = [
 
 class User:
 
-    def __init__(self, login: str):
-        self.login = login
+    def __init__(self, lgn: str):
+        self.login = lgn
 
 
 class Device:
 
-    def __init__(self, name: str, users_id: List[str], active):
+    def __init__(self, name: str, tp, users_id: List[str], active):
         self.name = name
+        self.tp = tp
         self.users_id = users_id
         self.active = active
+
+
+class Root:
+
+    def __init__(self, name, actions):
+        self.name = name
+        self.actions = actions
 
 
 class ObjectMapper:
@@ -49,7 +65,7 @@ class ObjectMapper:
     @staticmethod
     def parse_devices(response: PyreResponse) -> List[Device]:
         def parse_single(item: PyreResponse):
-            return Device(item.val()['name'], item.val()['users_id'], item.val()['active'])
+            return Device(item.val()['name'], item.val()['tp'], item.val()['users_id'], item.val()['active'])
 
         map_query = map(parse_single, response.each())
         return list(map_query)
@@ -58,6 +74,14 @@ class ObjectMapper:
     def parse_users(response: PyreResponse) -> List[User]:
         def parse_single(item: PyreResponse):
             return User(item.val()['login'])
+
+        map_query = map(parse_single, response.each())
+        return list(map_query)
+
+    @staticmethod
+    def parse_roots(response: PyreResponse) -> List[Root]:
+        def parse_single(item: PyreResponse):
+            return Root(item.val()['name'], item.val()['actions'])
 
         map_query = map(parse_single, response.each())
         return list(map_query)
@@ -72,8 +96,8 @@ class UserDao:
         users = self.db.child("users").get()
         return ObjectMapper.parse_users(users) if users.each() is not None else []
 
-    def insert(self, user: User):
-        user_dict = user.__dict__
+    def insert(self, usr: User):
+        user_dict = usr.__dict__
         self.db.child("users").push(user_dict)
 
 
@@ -90,12 +114,29 @@ class DeviceDao:
         devices = self.db.child("devices").get()
         return ObjectMapper.parse_devices(devices) if devices.each() is not None else []
 
-    def get_by_user(self, user: User):
-        return [d for d in self.get_all() if user.login in d.users_id]
+    def get_by_user(self, usr: User):
+        return [d for d in self.get_all() if usr.login in d.users_id]
 
     def insert(self, device: Device):
         device_dict = device.__dict__
         self.db.child("devices").child(device.name).set(device_dict)
+
+
+class RootDao:
+
+    def __init__(self, fb: Firebase):
+        self.db = fb.database()
+
+    def insert(self, root: Root):
+        root_dict = root.__dict__
+        self.db.child("device_root").child(root.name).set(root_dict)
+
+    def get_all(self) -> List[Root]:
+        roots = self.db.child("device_root").get()
+        return ObjectMapper.parse_roots(roots) if roots.each() is not None else []
+
+    def get_by_name(self, name: str):
+        return [x for x in self.get_all() if x.name == name]
 
 
 def get_config() -> str:
@@ -115,6 +156,7 @@ def establish_firebase():
 firebase = establish_firebase()
 dev_dao = DeviceDao(firebase)
 usr_dao = UserDao(firebase)
+rts_dao = RootDao(firebase)
 user = None
 
 
@@ -141,7 +183,9 @@ def device_chooser(update: Update, context: CallbackContext):
 
     for i, j in enumerate(all_dev):
         if choice == str(i):
-            query.edit_message_text("Вы выбрали " + j.name, reply_markup=keyboard)
+            query.edit_message_text(
+                "Вы выбрали " + j.name + '. Прибор ' + ('бездействует.' if not j.active else 'активен.'),
+                reply_markup=keyboard)
             chosen_device = j
             return
 
@@ -165,6 +209,11 @@ def device_chooser(update: Update, context: CallbackContext):
 
 
 def command(update: Update, context):
+    global registering, entering, inserting
+    registering = False
+    entering = False
+    inserting = False
+
     if user is None:
         update.message.reply_text("Вы не вошли в систему.")
         return
@@ -173,7 +222,8 @@ def command(update: Update, context):
     lst = [InlineKeyboardButton(text=j.name, callback_data=i) for i, j in enumerate(all_devs)]
     keys = [lst[i:i + 2] for i in range(0, len(lst) + 1, 2)]
     inline_keyboard = InlineKeyboardMarkup(keys)
-    update.message.reply_text("Выберите устройство.", reply_markup=inline_keyboard)
+    update.message.reply_text("Доступные вам устройства." if len(all_devs) > 0 else 'У вас нет устройств.',
+                              reply_markup=inline_keyboard)
 
 
 hint_dict = {
@@ -217,18 +267,103 @@ def parse_error_response(e: HTTPError):
     return str(e.errno).split()[0], json.loads(e.strerror)["error"]["message"].split()[0]
 
 
+spec_words = {
+    "ВНИМАНИЕ! Вы использовали слова 'база' или 'кринж' в диалоге с ботом! " +
+    "Вы разочаровать партию! Партия забрать у вас кошка-жена!": ['база', 'кринж']
+}
+
+morph = pymorphy2.MorphAnalyzer()
+
+
+def return_normal_form(word):
+    return morph.parse(word)[0].normal_form
+
+
+voice_id = 0
+
+
+def handle_voice(update: Update, context: CallbackContext):
+    global voice_id
+    voice_id += 1
+    file: File = context.bot.get_file(update.message.voice.file_id)
+
+    f_name = f"{voice_id}.ogg"
+    update.message.reply_text("Подождите...")
+    file.download(f_name)
+    time.sleep(20)
+
+    try:
+        AudioSegment.converter = os.getcwd() + "\\ffmpeg.exe"
+        AudioSegment.from_ogg(f_name).export(f"{voice_id}.wav", format='wav')
+        analyzer = SpeechOggAudioFileToText()
+        update.message.reply_text(analyzer.text)
+    except Exception as e:
+        print(e)
+        update.message.reply_text("Произошла непредвиденная ошибка. Попробуйте позже.")
+
+
+class SpeechOggAudioFileToText:
+    def __init__(self):
+        self.recognizer = Recognizer()
+
+    @property
+    def text(self):
+        global voice_id
+        file = f'{voice_id}.wav'
+
+        with AudioFile(file) as source:
+            audio = self.recognizer.record(source)
+
+        text = self.recognizer.recognize_google(audio, language='RU')
+        return text
+
+
 def handle_message(update: Update, context):
-    global registering, entering, user, inserting
+    global registering, entering, inserting, user
 
     if registering is False and entering is False and inserting is False:
-        update.message.reply_text("Не используется ни одна команда. Выберите из списка.")
+
+        if user is None:
+            update.message.reply_text("Вы не вошли в систему.")
+            return
+
+        text = update.message.text.split()
+        for word in text:
+
+            for key, list_special_word in spec_words.items():
+                if word.lower() in list_special_word:
+                    update.message.reply_text(key)
+                    return
+
+            for d in dev_dao.get_by_user(user):
+                if return_normal_form(word) in rts_dao.get_by_name(d.tp.lower())[0].actions:
+                    def async_write():
+                        update.message.reply_text(d.name + ' выполняет вашу просьбу.')
+                        time.sleep(5)
+                        update.message.reply_text("Всё готово.")
+
+                    Thread(target=async_write).run()
+                    return
+
+        update.message.reply_text('Ваша команда не может быть выполнена с вашими устройствами.')
         return
 
     if inserting is True:
-        name = update.message.text
-        dev_dao.insert(Device(name, [user.login], False))
+        tp, name = update.message.text.split()[0], update.message.text.split()[1]
+
+        if tp.lower() not in map(lambda x: x.name, rts_dao.get_all()):
+            update.message.reply_text("Данный вид техники не поддерживается.")
+            return
+
+        dev_dao.insert(Device(name, tp, [user.login], False))
         inserting = False
-        update.message.reply_text("Прибор " + name + " зарегистрирован.")
+
+        def async_write():
+            update.message.reply_text("Соединяю вас и " + name)
+            time.sleep(2)
+            update.message.reply_text("Привет. Готов служить вам.")
+
+        Thread(target=async_write).run()
         return
 
     if entering is True:
@@ -251,9 +386,11 @@ def handle_message(update: Update, context):
 
     email, usr_login = update.message.text.split()[0], update.message.text.split()[1]
     auth = firebase.auth()
+
     try:
         fb_usr = auth.create_user_with_email_and_password(email + "@gmail.com", usr_login)
         fb_usr = auth.refresh(fb_usr['refreshToken'])
+        usr_dao.insert(User(email))
         print(fb_usr)
     except HTTPError as e:
         code, msg = parse_error_response(e)
@@ -273,7 +410,7 @@ def add_device(update: Update, context):
         return
 
     inserting = True
-    update.message.reply_text("Введите название прибора.")
+    update.message.reply_text("Введите тип и название прибора.")
 
 
 def main():
@@ -285,6 +422,8 @@ def main():
     dp.add_handler(CommandHandler("register", register))
     dp.add_handler(CommandHandler("login", login))
     dp.add_handler(CommandHandler("add", add_device))
+
+    updater.dispatcher.add_handler(MessageHandler(Filters.voice, handle_voice))
 
     dp.add_handler(MessageHandler(Filters.text & ~ Filters.command, handle_message))
 

@@ -1,0 +1,4 @@
+*.spec
+
+ffmpeg.exe
+ffprobe.exe
