@@ -1,19 +1,21 @@
-import json
 import os
 import time
-from subprocess import Popen
 from threading import Thread
-from typing import List
 
-import pymorphy2
-import soundfile as soundfile
 from pydub import AudioSegment
 from pyrebase import pyrebase
-from pyrebase.pyrebase import Firebase, PyreResponse
 from requests import HTTPError
-from speech_recognition import Recognizer, AudioFile, UnknownValueError, RequestError
+from speech_recognition import Recognizer, AudioFile
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup, File
 from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, CallbackContext, MessageHandler, Filters
+
+from domain.FileUtils import get_config
+from domain.StringUtils import return_normal_form, error_to_hint, parse_error_response
+from model.dao.DeviceDao import DeviceDao
+from model.dao.RootDao import RootDao
+from model.dao.UserDao import UserDao
+from model.data.Device import Device
+from model.data.User import User
 
 config_name, token = 'config.json', '5332578418:AAGXhhCRmXroyGoLpSPK1mEwgNQ909YYJdw'
 
@@ -26,126 +28,10 @@ device_keys = [
     ['/start', '/stop']
 ]
 
-data_set = {
-    'Кофемашина': 'coffee',
-    'Микроволновка': 'microwave',
-    'Стиральная Машинка': 'washing'
-}
-
 device_action_keys = [
     [InlineKeyboardButton(text="Запуск", callback_data="enable")],
     [InlineKeyboardButton(text="Стоп", callback_data="stop")],
 ]
-
-
-class User:
-
-    def __init__(self, lgn: str):
-        self.login = lgn
-
-
-class Device:
-
-    def __init__(self, name: str, tp, users_id: List[str], active):
-        self.name = name
-        self.tp = tp
-        self.users_id = users_id
-        self.active = active
-
-
-class Root:
-
-    def __init__(self, name, actions):
-        self.name = name
-        self.actions = actions
-
-
-class ObjectMapper:
-
-    @staticmethod
-    def parse_devices(response: PyreResponse) -> List[Device]:
-        def parse_single(item: PyreResponse):
-            return Device(item.val()['name'], item.val()['tp'], item.val()['users_id'], item.val()['active'])
-
-        map_query = map(parse_single, response.each())
-        return list(map_query)
-
-    @staticmethod
-    def parse_users(response: PyreResponse) -> List[User]:
-        def parse_single(item: PyreResponse):
-            return User(item.val()['login'])
-
-        map_query = map(parse_single, response.each())
-        return list(map_query)
-
-    @staticmethod
-    def parse_roots(response: PyreResponse) -> List[Root]:
-        def parse_single(item: PyreResponse):
-            return Root(item.val()['name'], item.val()['actions'])
-
-        map_query = map(parse_single, response.each())
-        return list(map_query)
-
-
-class UserDao:
-
-    def __init__(self, fb: Firebase):
-        self.db = fb.database()
-
-    def get_all(self):
-        users = self.db.child("users").get()
-        return ObjectMapper.parse_users(users) if users.each() is not None else []
-
-    def insert(self, usr: User):
-        user_dict = usr.__dict__
-        self.db.child("users").push(user_dict)
-
-
-class DeviceDao:
-
-    def __init__(self, fb: Firebase):
-        self.db = fb.database()
-
-    def update_device_status(self, device: Device, active: bool):
-        update_dict = {"active": True if active else False}
-        self.db.child("devices").child(device.name).update(update_dict)
-
-    def get_all(self):
-        devices = self.db.child("devices").get()
-        return ObjectMapper.parse_devices(devices) if devices.each() is not None else []
-
-    def get_by_user(self, usr: User):
-        return [d for d in self.get_all() if usr.login in d.users_id]
-
-    def insert(self, device: Device):
-        device_dict = device.__dict__
-        self.db.child("devices").child(device.name).set(device_dict)
-
-
-class RootDao:
-
-    def __init__(self, fb: Firebase):
-        self.db = fb.database()
-
-    def insert(self, root: Root):
-        root_dict = root.__dict__
-        self.db.child("device_root").child(root.name).set(root_dict)
-
-    def get_all(self) -> List[Root]:
-        roots = self.db.child("device_root").get()
-        return ObjectMapper.parse_roots(roots) if roots.each() is not None else []
-
-    def get_by_name(self, name: str):
-        return [x for x in self.get_all() if x.name == name]
-
-
-def get_config() -> str:
-    with open(config_name, 'r') as config_file:
-        return parse_from_file(config_file)
-
-
-def parse_from_file(read_file) -> str:
-    return json.load(read_file)
 
 
 def establish_firebase():
@@ -154,18 +40,24 @@ def establish_firebase():
 
 
 firebase = establish_firebase()
+
 dev_dao = DeviceDao(firebase)
 usr_dao = UserDao(firebase)
 rts_dao = RootDao(firebase)
+
 user = None
+chosen_device = None
+
+registering = False
+entering = False
+inserting = False
+
+voice_id = 0
 
 
 def start(update, context):
     reply_markup = ReplyKeyboardMarkup(start_keys)
     update.message.reply_text("Бот запущен. Выберите команду.", reply_markup=reply_markup)
-
-
-chosen_device = None
 
 
 def device_chooser(update: Update, context: CallbackContext):
@@ -210,9 +102,7 @@ def device_chooser(update: Update, context: CallbackContext):
 
 def command(update: Update, context):
     global registering, entering, inserting
-    registering = False
-    entering = False
-    inserting = False
+    registering, inserting, entering = False, False, False
 
     if user is None:
         update.message.reply_text("Вы не вошли в систему.")
@@ -226,60 +116,16 @@ def command(update: Update, context):
                               reply_markup=inline_keyboard)
 
 
-hint_dict = {
-    "INVALID_EMAIL": "Некорректный логин",
-    "INVALID_PASSWORD": "Некорректный пароль",
-    "MISSING_PASSWORD": "Необходимо ввести пароль",
-    "EMAIL_NOT_FOUND": "Учётной записи с таким логином не существует",
-    "WEAK_PASSWORD": "Пароль должен быть как минимум 6 символов",
-    "EMAIL_EXISTS": "Учётная запись с таким логином уже существует",
-    "INVALID_CONNECTION": "Проблемы с сетью. Проверьте подключение",
-}
-
-registering = False
-entering = False
-inserting = False
-
-
 def login(update: Update, context):
     global entering, registering, inserting
-    entering = True
-    registering = False
-    inserting = False
-
+    entering, registering, inserting = True, False, False
     update.message.reply_text("Вход. Введите логин и пароль через пробел.")
 
 
 def register(update: Update, context):
     global registering, entering, inserting
-    registering = True
-    entering = False
-    inserting = False
-
+    registering, entering, inserting = True, False, False
     update.message.reply_text("Создание аккаунта. Введите логин и пароль через пробел.")
-
-
-def error_to_hint(err_str: str) -> str:
-    return hint_dict.get(err_str, "Неизвестная ошибка")
-
-
-def parse_error_response(e: HTTPError):
-    return str(e.errno).split()[0], json.loads(e.strerror)["error"]["message"].split()[0]
-
-
-spec_words = {
-    "ВНИМАНИЕ! Вы использовали слова 'база' или 'кринж' в диалоге с ботом! " +
-    "Вы разочаровать партию! Партия забрать у вас кошка-жена!": ['база', 'кринж']
-}
-
-morph = pymorphy2.MorphAnalyzer()
-
-
-def return_normal_form(word):
-    return morph.parse(word)[0].normal_form
-
-
-voice_id = 0
 
 
 def handle_voice(update: Update, context: CallbackContext):
@@ -298,8 +144,8 @@ def handle_voice(update: Update, context: CallbackContext):
         analyzer = SpeechOggAudioFileToText()
         update.message.reply_text(analyzer.text)
     except Exception as e:
-        print(e)
         update.message.reply_text("Произошла непредвиденная ошибка. Попробуйте позже.")
+        print(e)
 
 
 class SpeechOggAudioFileToText:
@@ -329,12 +175,6 @@ def handle_message(update: Update, context):
 
         text = update.message.text.split()
         for word in text:
-
-            for key, list_special_word in spec_words.items():
-                if word.lower() in list_special_word:
-                    update.message.reply_text(key)
-                    return
-
             for d in dev_dao.get_by_user(user):
                 if return_normal_form(word) in rts_dao.get_by_name(d.tp.lower())[0].actions:
                     def async_write():
@@ -403,13 +243,13 @@ def handle_message(update: Update, context):
 
 
 def add_device(update: Update, context):
-    global inserting
+    global inserting, entering, registering
 
     if user is None:
         update.message.reply_text("Вы не вошли в систему.")
         return
 
-    inserting = True
+    inserting, entering, registering = True, False, False
     update.message.reply_text("Введите тип и название прибора.")
 
 
@@ -423,11 +263,9 @@ def main():
     dp.add_handler(CommandHandler("login", login))
     dp.add_handler(CommandHandler("add", add_device))
 
-    updater.dispatcher.add_handler(MessageHandler(Filters.voice, handle_voice))
-
+    dp.add_handler(MessageHandler(Filters.voice, handle_voice))
     dp.add_handler(MessageHandler(Filters.text & ~ Filters.command, handle_message))
-
-    updater.dispatcher.add_handler(CallbackQueryHandler(device_chooser))
+    dp.add_handler(CallbackQueryHandler(device_chooser))
 
     updater.start_polling()
 

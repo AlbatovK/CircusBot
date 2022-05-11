@@ -1,4 +1,17 @@
+/venv/*
+/venv/
+
+/.idea/*
+/.idea/
+
+/dist/
+/dist/*
+
+/build/
+/build/*
+
 *.spec
+*.exe
 
 ffmpeg.exe
 ffprobe.exe
