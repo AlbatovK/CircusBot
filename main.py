@@ -1,256 +1,124 @@
-import os
-import time
-from threading import Thread
-
-from pydub import AudioSegment
 from pyrebase import pyrebase
-from requests import HTTPError
-from speech_recognition import Recognizer, AudioFile
-from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup, File
+from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, CallbackContext, MessageHandler, Filters
 
 from domain.FileUtils import get_config
-from domain.StringUtils import return_normal_form, error_to_hint, parse_error_response
-from model.dao.DeviceDao import DeviceDao
-from model.dao.RootDao import RootDao
+from model.dao.TaskDao import TaskDao
 from model.dao.UserDao import UserDao
-from model.data.Device import Device
 from model.data.User import User
 
 config_name, token = 'config.json', '5332578418:AAGXhhCRmXroyGoLpSPK1mEwgNQ909YYJdw'
+start_keys = [['/info', '/answer'], ['/balance']]
+usr_state_mp = {}
 
-start_keys = [
-    ['/register', '/login'],
-    ['/command', '/add']
-]
-
-device_keys = [
-    ['/start', '/stop']
-]
-
-device_action_keys = [
-    [InlineKeyboardButton(text="Запуск", callback_data="enable")],
-    [InlineKeyboardButton(text="Стоп", callback_data="stop")],
-]
-
-
-def establish_firebase():
-    firebase_config = get_config()
-    return pyrebase.initialize_app(firebase_config)
-
-
-firebase = establish_firebase()
-
-dev_dao = DeviceDao(firebase)
+firebase_config = get_config()
+firebase = pyrebase.initialize_app(firebase_config)
+task_dao = TaskDao(firebase)
 usr_dao = UserDao(firebase)
-rts_dao = RootDao(firebase)
 
-user = None
-chosen_device = None
+second_time_txt = "Добро пожаловать! Если забыл правила, можешь освежить память, нажав /info."
+first_time_txt = "Ты здесь в первый раз, да? Если что-то непонятно, нажми /info. Удачи!"
 
-registering = False
-entering = False
-inserting = False
+info = '''
+Вас приветствует бот помощник клоунов 11Б🤡
+С его помощью вы можете взаимодействовать с нашей одноименной валютой Б-коинами🤑, а именно: зарабатывать Б-коины за ответы на вопросы✏,
+проверять личный баланс💰
+Совсем скоро мы опубликуем список призов, которые возможно получить, обменивая валюту, так что следите за новостями!🦊
 
-voice_id = 0
+Stonks📈
+
+1. подсказка: если хотите узнать количество человек в 11Б, то спросите у ученика с красным носом, он с радостью вам ответит!🤓
+
+2.подсказка: для второго задания следует писать все 10 слов с маленькой буквы через пробел без точек и цифр!😧
+'''
 
 
 def start(update, context):
+    print(context)
     reply_markup = ReplyKeyboardMarkup(start_keys)
     update.message.reply_text("Бот запущен. Выберите команду.", reply_markup=reply_markup)
 
 
-def device_chooser(update: Update, context: CallbackContext):
-    global chosen_device, user
+def information(update: Update, context):
+    print(context)
+    update.message.reply_text(info)
 
+
+def tasks_chooser(update: Update, context: CallbackContext):
+    print(context)
+
+    usr = [x for x in usr_dao.get_all() if x.user_id == update.callback_query.from_user.id][0]
     query = update.callback_query
-    choice = query.data
+    task = [t for t in task_dao.get_all() if int(query.data) == t.task_id][0]
+    usr_state_mp[usr.user_id] = task
+
     query.answer()
+    query.edit_message_text(f"Вопрос - {task.description}" + "\n" + "Напишите ваш ответ")
 
-    if user is None:
+
+def handle_plain(update: Update, context):
+    print(context)
+
+    users = [x for x in usr_dao.get_all() if x.user_id == update.message.from_user.id]
+    if not users:
+        update.message.reply_text("Нажми /info или /answer чтобы войти в курс дела!")
         return
 
-    keyboard = InlineKeyboardMarkup(device_action_keys)
-    all_dev = dev_dao.get_by_user(user)
-
-    for i, j in enumerate(all_dev):
-        if choice == str(i):
-            query.edit_message_text(
-                "Вы выбрали " + j.name + '. Прибор ' + ('бездействует.' if not j.active else 'активен.'),
-                reply_markup=keyboard)
-            chosen_device = j
-            return
-
-    if chosen_device is None:
+    usr = users[0]
+    task = usr_state_mp.get(usr.user_id, None)
+    if task is None:
+        update.message.reply_text("Выберите вопрос, на котороый хотите ответить, нажав /info!")
         return
 
-    if choice == 'enable':
-        if chosen_device.active is False:
-            dev_dao.update_device_status(chosen_device, True)
-            chosen_device.active = True
-            query.edit_message_text(chosen_device.name + " запущен", reply_markup=keyboard)
-        else:
-            query.edit_message_text(chosen_device.name + " уже запущен на данный момент.", reply_markup=keyboard)
-    elif choice == 'stop':
-        if chosen_device.active is True:
-            dev_dao.update_device_status(chosen_device, False)
-            chosen_device.active = False
-            query.edit_message_text(chosen_device.name + " остановлен.", reply_markup=keyboard)
-        else:
-            query.edit_message_text(chosen_device.name + " уже остановлен на данный момент.", reply_markup=keyboard)
+    if update.message.text.lower() == task.answer.lower():
+        update.message.reply_text("Отлично! Вы правильно ответили на вопрос! Ваш баланс увеличился!")
+        task_dao.increment_task_answered(task)
+        usr.score += 10
+        usr_dao.do_task(usr, task)
 
-
-def command(update: Update, context):
-    global registering, entering, inserting
-    registering, inserting, entering = False, False, False
-
-    if user is None:
-        update.message.reply_text("Вы не вошли в систему.")
+        usr_state_mp[usr.user_id] = None
         return
 
-    all_devs = dev_dao.get_by_user(user)
-    lst = [InlineKeyboardButton(text=j.name, callback_data=i) for i, j in enumerate(all_devs)]
-    keys = [lst[i:i + 2] for i in range(0, len(lst) + 1, 2)]
+    usr_state_mp[usr.user_id] = None
+    update.message.reply_text("Неправильный ответ... Попробуй ещё раз!")
+    print(task.answer)
+
+
+def answer(update: Update, context):
+    print(context)
+    users = usr_dao.get_all()
+    usr: User
+
+    if update.message.from_user.id not in [x.user_id for x in users]:
+        tg_usr = update.message.from_user
+        db_usr = User(tg_usr.id, 0, tg_usr.name, tg_usr.full_name)
+        usr_dao.insert(db_usr)
+        welcome_txt = first_time_txt
+        usr = db_usr
+    else:
+        welcome_txt = second_time_txt
+        usr = [x for x in users if x.user_id == update.message.from_user.id][0]
+
+    done_tasks_ids = [x.task_id for x in usr_dao.get_done_tasks(usr)]
+    tasks = [t for t in task_dao.get_all() if t.task_id not in done_tasks_ids]
+
+    lst = [InlineKeyboardButton(text=j.description, callback_data=j.task_id) for i, j in enumerate(tasks)]
+    keys = [lst[i:i + 1] for i in range(0, len(lst))]
     inline_keyboard = InlineKeyboardMarkup(keys)
-    update.message.reply_text("Доступные вам устройства." if len(all_devs) > 0 else 'У вас нет устройств.',
-                              reply_markup=inline_keyboard)
+
+    text = welcome_txt + "\n" * 2 + "Вот список доступных вопросов." if len(tasks) > 0 else 'Вы выполнили все задания.'
+    update.message.reply_text(text, reply_markup=inline_keyboard)
 
 
-def login(update: Update, context):
-    global entering, registering, inserting
-    entering, registering, inserting = True, False, False
-    update.message.reply_text("Вход. Введите логин и пароль через пробел.")
-
-
-def register(update: Update, context):
-    global registering, entering, inserting
-    registering, entering, inserting = True, False, False
-    update.message.reply_text("Создание аккаунта. Введите логин и пароль через пробел.")
-
-
-def handle_voice(update: Update, context: CallbackContext):
-    global voice_id
-    voice_id += 1
-    file: File = context.bot.get_file(update.message.voice.file_id)
-
-    f_name = f"{voice_id}.ogg"
-    update.message.reply_text("Подождите...")
-    file.download(f_name)
-    time.sleep(20)
-
-    try:
-        AudioSegment.converter = os.getcwd() + "\\ffmpeg.exe"
-        AudioSegment.from_ogg(f_name).export(f"{voice_id}.wav", format='wav')
-        analyzer = SpeechOggAudioFileToText()
-        update.message.reply_text(analyzer.text)
-    except Exception as e:
-        update.message.reply_text("Произошла непредвиденная ошибка. Попробуйте позже.")
-        print(e)
-
-
-class SpeechOggAudioFileToText:
-    def __init__(self):
-        self.recognizer = Recognizer()
-
-    @property
-    def text(self):
-        global voice_id
-        file = f'{voice_id}.wav'
-
-        with AudioFile(file) as source:
-            audio = self.recognizer.record(source)
-
-        text = self.recognizer.recognize_google(audio, language='RU')
-        return text
-
-
-def handle_message(update: Update, context):
-    global registering, entering, inserting, user
-
-    if registering is False and entering is False and inserting is False:
-
-        if user is None:
-            update.message.reply_text("Вы не вошли в систему.")
-            return
-
-        text = update.message.text.split()
-        for word in text:
-            for d in dev_dao.get_by_user(user):
-                if return_normal_form(word) in rts_dao.get_by_name(d.tp.lower())[0].actions:
-                    def async_write():
-                        update.message.reply_text(d.name + ' выполняет вашу просьбу.')
-                        time.sleep(5)
-                        update.message.reply_text("Всё готово.")
-
-                    Thread(target=async_write).run()
-                    return
-
-        update.message.reply_text('Ваша команда не может быть выполнена с вашими устройствами.')
-        return
-
-    if inserting is True:
-        tp, name = update.message.text.split()[0], update.message.text.split()[1]
-
-        if tp.lower() not in map(lambda x: x.name, rts_dao.get_all()):
-            update.message.reply_text("Данный вид техники не поддерживается.")
-            return
-
-        dev_dao.insert(Device(name, tp, [user.login], False))
-        inserting = False
-
-        def async_write():
-            update.message.reply_text("Соединяю вас и " + name)
-            time.sleep(2)
-            update.message.reply_text("Привет. Готов служить вам.")
-
-        Thread(target=async_write).run()
-        return
-
-    if entering is True:
-        email, usr_login = update.message.text.split()[0], update.message.text.split()[1]
-        auth = firebase.auth()
-
-        try:
-            fb_usr = auth.sign_in_with_email_and_password(email + "@gmail.com", usr_login)
-            fb_usr = auth.refresh(fb_usr['refreshToken'])
-            print(fb_usr)
-            entering = False
-        except HTTPError as e:
-            code, msg = parse_error_response(e)
-            update.message.reply_text(error_to_hint(msg) + ". Попробуйте ввести данные ещё раз.")
-            return
-
-        user = User(email)
-        update.message.reply_text("Пользователь " + user.login + " успешно вошёл.")
-        return
-
-    email, usr_login = update.message.text.split()[0], update.message.text.split()[1]
-    auth = firebase.auth()
-
-    try:
-        fb_usr = auth.create_user_with_email_and_password(email + "@gmail.com", usr_login)
-        fb_usr = auth.refresh(fb_usr['refreshToken'])
-        usr_dao.insert(User(email))
-        print(fb_usr)
-    except HTTPError as e:
-        code, msg = parse_error_response(e)
-        update.message.reply_text(error_to_hint(msg) + ". Попробуйте ввести данные ещё раз.")
-        return
-
-    user = User(email)
-    update.message.reply_text("Пользователь " + user.login + " успешно зарегистрирован.")
-    registering = False
-
-
-def add_device(update: Update, context):
-    global inserting, entering, registering
-
-    if user is None:
-        update.message.reply_text("Вы не вошли в систему.")
-        return
-
-    inserting, entering, registering = True, False, False
-    update.message.reply_text("Введите тип и название прибора.")
+def balance(update: Update, context):
+    print(context)
+    users = [x for x in usr_dao.get_all() if x.user_id == update.message.from_user.id]
+    if not users:
+        update.message.reply_text("Вас нет в списке участников игры. Нажмите /answer, чтобы поучаствовать.")
+    else:
+        usr = users[0]
+        text = f"{usr.name}, id = {usr.user_id}, баланс = {usr.score}"
+        update.message.reply_text(text)
 
 
 def main():
@@ -258,15 +126,13 @@ def main():
     dp = updater.dispatcher
 
     dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CommandHandler("command", command))
-    dp.add_handler(CommandHandler("register", register))
-    dp.add_handler(CommandHandler("login", login))
-    dp.add_handler(CommandHandler("add", add_device))
+    dp.add_handler(CommandHandler("answer", answer))
+    dp.add_handler(CommandHandler("info", information))
+    dp.add_handler(CommandHandler("balance", balance))
 
-    dp.add_handler(MessageHandler(Filters.voice, handle_voice))
-    dp.add_handler(MessageHandler(Filters.text & ~ Filters.command, handle_message))
-    dp.add_handler(CallbackQueryHandler(device_chooser))
-
+    message_filter = Filters.text & ~ Filters.command
+    dp.add_handler(MessageHandler(message_filter, handle_plain))
+    dp.add_handler(CallbackQueryHandler(tasks_chooser))
     updater.start_polling()
 
 
