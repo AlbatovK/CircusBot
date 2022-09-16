@@ -21,7 +21,8 @@ class UserDao:
     def do_task(self, usr: User, task: Task):
         update_dict = {"score": usr.score}
         self.db.child("users").child(usr.login).update(update_dict)
-        self.db.child("users").child(usr.login).child("done").child(task.task_id).set(task.__dict__)
+        task_dict = task.__dict__
+        self.db.child("users").child(usr.login).child("done").child(task.task_id).set(task_dict)
 
     def insert(self, usr: User):
         user_dict = usr.__dict__

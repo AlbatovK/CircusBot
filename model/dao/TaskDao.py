@@ -20,4 +20,5 @@ class TaskDao:
         self.db.child("tasks").child(task.task_id).update(update_dict)
 
     def insert(self, task: Task):
-        self.db.child("tasks").child(task.task_id).set(task.__dict__)
+        task_dict = task.__dict__
+        self.db.child("tasks").child(task.task_id).set(task_dict)

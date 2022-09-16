@@ -12,10 +12,12 @@ class ObjectMapper:
     def parse_tasks(response: PyreResponse) -> List[Task]:
         def parse_single(item: PyreResponse) -> Task:
             val = item.val()
-            task_id, description, answer, answered = val['task_id'], val['description'], val['answer'], val['answered']
-            return Task(task_id, description, answer, answered)
+            if val is not None:
+                task_id, description, answer, answered = val['task_id'], val['description'], val['answer'], val['answered']
+                return Task(task_id, description, answer, answered)
+            return None
 
-        map_query = map(parse_single, response.each())
+        map_query = filter(lambda x: x is not None, map(parse_single, response.each()))
         return list(map_query)
 
     @staticmethod

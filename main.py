@@ -34,19 +34,15 @@ Stonks📈
 
 
 def start(update, context):
-    print(context)
     reply_markup = ReplyKeyboardMarkup(start_keys)
     update.message.reply_text("Бот запущен. Выберите команду.", reply_markup=reply_markup)
 
 
 def information(update: Update, context):
-    print(context)
     update.message.reply_text(info)
 
 
 def tasks_chooser(update: Update, context: CallbackContext):
-    print(context)
-
     usr = [x for x in usr_dao.get_all() if x.user_id == update.callback_query.from_user.id][0]
     query = update.callback_query
     task = [t for t in task_dao.get_all() if int(query.data) == t.task_id][0]
@@ -57,7 +53,7 @@ def tasks_chooser(update: Update, context: CallbackContext):
 
 
 def handle_plain(update: Update, context):
-    print(context)
+    print(update.message.text + " " + update.message.from_user.full_name)
 
     users = [x for x in usr_dao.get_all() if x.user_id == update.message.from_user.id]
     if not users:
@@ -66,8 +62,15 @@ def handle_plain(update: Update, context):
 
     usr = users[0]
     task = usr_state_mp.get(usr.user_id, None)
+
     if task is None:
         update.message.reply_text("Выберите вопрос, на котороый хотите ответить, нажав /info!")
+        return
+
+    done_tasks_ids = [x.task_id for x in usr_dao.get_done_tasks(usr)]
+    if task.task_id in done_tasks_ids:
+        update.message.reply_text("Вы уже отвечали на этот вопрос!")
+        usr_state_mp[usr.user_id] = None
         return
 
     if update.message.text.lower() == task.answer.lower():
@@ -80,12 +83,11 @@ def handle_plain(update: Update, context):
         return
 
     usr_state_mp[usr.user_id] = None
-    update.message.reply_text("Неправильный ответ... Попробуй ещё раз!")
+    update.message.reply_text("Неправильный ответ... Нажми /answer и попробуй ещё раз!")
     print(task.answer)
 
 
 def answer(update: Update, context):
-    print(context)
     users = usr_dao.get_all()
     usr: User
 
@@ -111,13 +113,12 @@ def answer(update: Update, context):
 
 
 def balance(update: Update, context):
-    print(context)
     users = [x for x in usr_dao.get_all() if x.user_id == update.message.from_user.id]
     if not users:
         update.message.reply_text("Вас нет в списке участников игры. Нажмите /answer, чтобы поучаствовать.")
     else:
         usr = users[0]
-        text = f"{usr.name}, id = {usr.user_id}, баланс = {usr.score}"
+        text = f"{usr.name}, id = {usr.user_id}, баланс = {usr.score} Б-коинов"
         update.message.reply_text(text)
 
 
@@ -125,14 +126,14 @@ def main():
     updater = Updater(token)
     dp = updater.dispatcher
 
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CommandHandler("answer", answer))
-    dp.add_handler(CommandHandler("info", information))
-    dp.add_handler(CommandHandler("balance", balance))
+    dp.add_handler(CommandHandler("start", start, run_async=True))
+    dp.add_handler(CommandHandler("answer", answer, run_async=True))
+    dp.add_handler(CommandHandler("info", information, run_async=True))
+    dp.add_handler(CommandHandler("balance", balance, run_async=True))
 
     message_filter = Filters.text & ~ Filters.command
-    dp.add_handler(MessageHandler(message_filter, handle_plain))
-    dp.add_handler(CallbackQueryHandler(tasks_chooser))
+    dp.add_handler(MessageHandler(message_filter, handle_plain, run_async=True))
+    dp.add_handler(CallbackQueryHandler(tasks_chooser, run_async=True))
     updater.start_polling()
 
 
